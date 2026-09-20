@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Football Analytics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 720px;
+    margin: 48px auto;
+    padding: 0 16px;
+    color: #1f2937;
+  }
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    color: #14213d;
+    margin-bottom: 4px;
+  }
+  #intro {
+    color: #4b5563;
+    font-size: 15px;
+    line-height: 1.5;
+    margin-bottom: 24px;
+  }
+  #metrics {
+    color: #6b7280;
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  #metrics b { color: #374151; }
+
+  .picker-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .picker-row select {
+    flex: 1;
+    padding: 8px;
+    font-size: 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+  }
+
+  #chat {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 12px;
+    height: 340px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+    background: #fafafa;
+  }
+  .msg { margin: 8px 0; padding: 8px 12px; border-radius: 10px; max-width: 80%; font-size: 14px; }
+  .user { background: #dbeafe; margin-left: auto; text-align: right; }
+  .assistant { background: #ffffff; border: 1px solid #e5e7eb; }
+
+  #input-row { display: flex; gap: 8px; }
+  #question { flex: 1; padding: 10px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 6px; }
+  #send {
+    padding: 10px 18px;
+    font-size: 14px;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #send:hover { background: #1d4ed8; }
+
+  #chart-container { margin-top: 20px; display: none; }
+</style>
+</head>
+<body>
+
+<h1>Football Analytics</h1>
+<div id="intro">
+  Ask questions about football matches using real event data from
+  StatsBomb's open dataset. Select a competition and match below, then
+  ask your question about that match.
+</div>
+<div id="metrics">Loading available metrics...</div>
+
+<div class="picker-row">
+  <select id="competition-select"><option>Loading competitions...</option></select>
+  <select id="match-select"><option>Loading matches...</option></select>
+</div>
+
+<div id="chat"></div>
+
+<div id="input-row">
+  <input id="question" type="text" placeholder="Ask a question...">
+  <button id="send">Send</button>
+</div>
+
+<div id="chart-container">
+  <canvas id="chart"></canvas>
+</div>
+
+<script>
+  // change this after deploying the backend elsewhere (e.g. to Render)
+  const API_URL = "http://127.0.0.1:8001";
+
+  const sessionId = crypto.randomUUID();
+  const chat = document.getElementById("chat");
+  const questionInput = document.getElementById("question");
+  const competitionSelect = document.getElementById("competition-select");
+  const matchSelect = document.getElementById("match-select");
+  let chartInstance = null;
+  let competitions = [];
+
+  async function loadMetrics() {
+    const res = await fetch(`${API_URL}/metrics`);
+    const data = await res.json();
+    document.getElementById("metrics").innerHTML =
+      "<b>You can ask about:</b> " + data.metrics.join(", ");
+  }
+
+  async function loadCompetitions() {
+    const res = await fetch(`${API_URL}/competitions`);
+    competitions = await res.json();
+
+    competitionSelect.innerHTML = competitions
+      .map((c, i) => `<option value="${i}">${c.competition_name} — ${c.season_name}</option>`)
+      .join("");
+
+    await loadMatches();
+  }
+
+  async function loadMatches() {
+    const comp = competitions[competitionSelect.value];
+    const res = await fetch(`${API_URL}/matches?competition_id=${comp.competition_id}&season_id=${comp.season_id}`);
+    const matches = await res.json();
+
+    matchSelect.innerHTML = matches
+      .map((m) => `<option value="${m.match_id}">${m.home_team.home_team_name} vs ${m.away_team.away_team_name} (${m.match_date})</option>`)
+      .join("");
+  }
+
+  function addMessage(text, role) {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    div.textContent = text;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function renderChart(spec) {
+    const container = document.getElementById("chart-container");
+    if (!spec) {
+      container.style.display = "none";
+      return;
+    }
+    container.style.display = "block";
+
+    if (chartInstance) {
+      chartInstance.destroy();
+    }
+    const ctx = document.getElementById("chart").getContext("2d");
+    chartInstance = new Chart(ctx, {
+      type: spec.type,
+      data: {
+        labels: spec.x,
+        datasets: [{ label: spec.y_label, data: spec.y }],
+      },
+      options: {
+        plugins: { title: { display: true, text: spec.title } },
+        scales: {
+          x: { title: { display: true, text: spec.x_label } },
+          y: { title: { display: true, text: spec.y_label } },
+        },
+      },
+    });
+  }
+
+  async function sendQuestion() {
+    const question = questionInput.value.trim();
+    if (!question) return;
+
+    addMessage(question, "user");
+    questionInput.value = "";
+
+    const res = await fetch(`${API_URL}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        match_id: parseInt(matchSelect.value, 10),
+        session_id: sessionId,
+      }),
+    });
+
+    if (!res.ok) {
+      addMessage("Something went wrong talking to the server.", "assistant");
+      return;
+    }
+
+    const data = await res.json();
+    addMessage(data.message, "assistant");
+    renderChart(data.chart);
+  }
+
+  document.getElementById("send").addEventListener("click", sendQuestion);
+  questionInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendQuestion();
+  });
+  competitionSelect.addEventListener("change", loadMatches);
+
+  loadMetrics();
+  loadCompetitions();
+</script>
+
+</body>
+</html>
